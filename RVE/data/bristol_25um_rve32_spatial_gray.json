@@ -1,0 +1,72 @@
+{
+  "tif_dir": "/wangjie/bristol/25micron_60min",
+  "volume_shape_zyx": [
+    240,
+    240,
+    240
+  ],
+  "crop_size": 32,
+  "stride": 32,
+  "target_porosity": 0.02,
+  "store_gray": true,
+  "global_threshold": 0.5454545617103577,
+  "num_rves": 325,
+  "porosity_min_mean_max": [
+    0.00115966796875,
+    0.02335064299404621,
+    0.10498046875
+  ],
+  "split_mode": "spatial_z_blocks",
+  "split_meta": {
+    "axis": "z",
+    "n_axis": 240,
+    "crop_start_layers": [
+      0,
+      32,
+      64,
+      96,
+      128,
+      160,
+      192
+    ],
+    "n_layers": 7,
+    "train_layers": [
+      0,
+      32,
+      64,
+      96,
+      128
+    ],
+    "val_layers": [
+      160
+    ],
+    "test_layers": [
+      192
+    ],
+    "gap_layers": 0,
+    "policy": "split by non-overlapping crop-start layers; optional gap layers are discarded"
+  },
+  "split_counts": {
+    "test": 41,
+    "train": 237,
+    "val": 47
+  },
+  "porosity_bin_counts_by_split": {
+    "test": {
+      "phi_1_2pct": 10,
+      "phi_ge_2pct": 17,
+      "phi_lt_1pct": 14
+    },
+    "train": {
+      "phi_1_2pct": 61,
+      "phi_ge_2pct": 106,
+      "phi_lt_1pct": 70
+    },
+    "val": {
+      "phi_1_2pct": 13,
+      "phi_ge_2pct": 17,
+      "phi_lt_1pct": 17
+    }
+  },
+  "microstructure_generalization_claim": "AENO is evaluated on spatially held-out, non-overlapping RVE crops from the same XCT volume, not on independent XCT scans."
+}
