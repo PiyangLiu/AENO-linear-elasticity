@@ -1,0 +1,23 @@
+{
+  "data": "data/synthetic_void_rve32_test.npz",
+  "checkpoint": "runs/aeno_rve32_v2_res5e4_bubble085/best.pt",
+  "out_dir": "runs/aeno_rve32_v2_res5e4_bubble085/eval_synthetic_ood",
+  "crop_size": 32,
+  "num_samples": 100000,
+  "base_channels": null,
+  "eps0": 0.01,
+  "alpha_void": null,
+  "Es_values": [
+    1.0
+  ],
+  "nu_values": [
+    0.33
+  ],
+  "fem_downsample": 1,
+  "fem_tol": 1e-08,
+  "fem_maxiter": 2000,
+  "split": "test",
+  "device": "cuda",
+  "save_npz": true,
+  "verbose_fem": false
+}
