@@ -1,0 +1,11 @@
+experiment,replicates,retraining,primary_output,supplementary_table
+CT-RVE full model seeds,3,yes,supplementary_runs/rve/full_seed*/eval_test,S10;S11
+CT-RVE energy-only seeds,3,yes,supplementary_runs/rve/energy_only_seed*/eval_test,S7
+CT-RVE alpha-void sensitivity,2 plus baseline,yes,supplementary_runs/rve_sensitivity/alpha*,S9
+CT-RVE boundary-exponent sensitivity,2 plus baseline,yes,supplementary_runs/rve_sensitivity/bubble*,S9
+CT-RVE segmentation sensitivity,2 plus baseline,yes,supplementary_runs/rve_sensitivity/threshold*,S9
+Synthetic topology evaluation,1,no,supplementary_runs/rve_topology,S5;S6
+Reservoir full model seeds,3,yes,supplementary_runs/reservoir_seeds,S10;S11
+Reservoir ablations,5,yes,supplementary_runs/reservoir_ablation,S8
+Reservoir finite-difference sensitivity,2 plus baseline,yes,supplementary_runs/reservoir_fd,S9
+Reservoir FEM mesh convergence,5 cases x 3 grids,no,supplementary_runs/reservoir_mesh,S13
