@@ -1,6 +1,6 @@
 numpy>=1.23
 scipy>=1.9
-scikit-image>=0.20
+# scikit-image>=0.20 is optional; topology analysis has a NumPy fallback.
 tifffile>=2023.0.0
 torch>=2.0
 matplotlib>=3.7

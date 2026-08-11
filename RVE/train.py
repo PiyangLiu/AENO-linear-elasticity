@@ -1,6 +1,9 @@
 import argparse
 import json
+import platform
 from pathlib import Path
+import sys
+import time
 
 import numpy as np
 import torch
@@ -41,6 +44,7 @@ def parse_args():
     p.add_argument("--residual_ramp_epochs", type=int, default=25, help="Linearly ramp residual_weight during early training; 0 disables ramp.")
     p.add_argument("--interface_residual_alpha", type=float, default=2.0, help="Element interface weight w_e=1+alpha*I_interface,e used in residual loss.")
     p.add_argument("--residual_scale", type=str, default="force", choices=["force", "energy", "none"])
+    p.add_argument("--deterministic", action="store_true", help="Request deterministic PyTorch algorithms where supported.")
     return p.parse_args()
 
 
@@ -106,11 +110,19 @@ def evaluate_objective(model, loader, args, device):
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        if torch.backends.cudnn.is_available():
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
 
+    setup_start = time.perf_counter()
     Es_range = (args.Es_min, args.Es_max)
     nu_range = (args.nu_min, args.nu_max)
     train_ds = RVENPZDataset(
@@ -136,6 +148,7 @@ def main():
     else:
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=max(1, args.batch_size), shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    setup_time_s = time.perf_counter() - setup_start
 
     model = AdmissibleAENO(
         n=args.crop_size,
@@ -145,6 +158,7 @@ def main():
         nu_range=nu_range,
         bubble_power=args.bubble_power,
     ).to(device)
+    num_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
 
@@ -155,12 +169,25 @@ def main():
         "aeno_v2": "nodal_u_hex8_center_recovery_energy_plus_free_dof_residual",
         "u_output": "nodal [B,3,N+1,N+1,N+1]",
         "strain_stress_recovery": "Hex8 center B matrix, same node ordering as FEM",
+        "checkpoint_selection": "minimum label-free validation objective",
+        "test_split_used_for_selection": False,
+        "num_parameters": int(num_parameters),
+        "setup_time_s": float(setup_time_s),
+        "python_version": sys.version.split()[0],
+        "platform": platform.platform(),
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
     })
     with open(out_dir / "config.json", "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
 
     best_val = float("inf")
+    best_epoch = -1
     log_rows = []
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    training_start = time.perf_counter()
     for ep in range(1, args.epochs + 1):
         model.train()
         ramp = 1.0 if args.residual_ramp_epochs <= 0 else min(1.0, ep / float(args.residual_ramp_epochs))
@@ -212,13 +239,52 @@ def main():
 
         if val["val_loss"] < best_val:
             best_val = val["val_loss"]
+            best_epoch = ep
             torch.save({"model": model.state_dict(), "args": cfg, "epoch": ep, "val_loss": val["val_loss"]}, out_dir / "best.pt")
         if ep % args.save_every == 0:
             torch.save({"model": model.state_dict(), "args": cfg, "epoch": ep, "val_loss": val["val_loss"]}, out_dir / f"epoch_{ep:04d}.pt")
 
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    torch.save(
+        {"model": model.state_dict(), "args": cfg, "epoch": args.epochs, "val_loss": log_rows[-1]["val_loss"]},
+        out_dir / "final.pt",
+    )
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    training_time_s = time.perf_counter() - training_start
+
     import pandas as pd
     pd.DataFrame(log_rows).to_csv(out_dir / "training_log.csv", index=False)
+    run_summary = {
+        "seed": int(args.seed),
+        "objective": "energy_only" if args.residual_weight == 0 else "energy_plus_equilibrium",
+        "residual_weight": float(args.residual_weight),
+        "best_epoch": int(best_epoch),
+        "best_validation_objective": float(best_val),
+        "final_validation_objective": float(log_rows[-1]["val_loss"]),
+        "checkpoint_selection": "minimum label-free validation objective",
+        "test_split_used_for_selection": False,
+        "num_parameters": int(num_parameters),
+        "dataset_and_feature_setup_time_s": float(setup_time_s),
+        "training_time_s": float(training_time_s),
+        "training_time_scope": "optimization, validation and checkpointing; excludes dataset loading and feature construction",
+        "stiffness_preprocessing_time_s": 0.0,
+        "stiffness_preprocessing_note": "Hex8 stiffness application is constructed within each objective evaluation and is included in training time.",
+        "environment": {
+            "python": sys.version.split()[0],
+            "platform": platform.platform(),
+            "torch": torch.__version__,
+            "cuda": torch.version.cuda,
+            "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+        },
+    }
+    with open(out_dir / "run_summary.json", "w", encoding="utf-8") as f:
+        json.dump(run_summary, f, indent=2)
     print(f"Best validation objective: {best_val:.6e}")
+    print(f"Best epoch: {best_epoch}")
+    print(f"Dataset/feature setup time: {setup_time_s:.2f} s")
+    print(f"Training time: {training_time_s:.2f} s")
     print(f"Saved best checkpoint to: {out_dir / 'best.pt'}")
 
 

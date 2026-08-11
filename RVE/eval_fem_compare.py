@@ -1,5 +1,7 @@
 import argparse
 import json
+import platform
+import sys
 import time
 from pathlib import Path
 
@@ -11,7 +13,7 @@ import matplotlib.pyplot as plt
 
 from aeno_rve.data import RVENPZDataset
 from aeno_rve.model import AdmissibleAENO
-from aeno_rve.elasticity import compute_fields
+from aeno_rve.elasticity import compute_fields, fem_energy_residual_objective
 from aeno_rve.fem import solve_fem_kubc, block_average_3d
 
 
@@ -37,6 +39,9 @@ def parse_args():
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--save_npz", action="store_true", help="Save fields for each compared case")
     p.add_argument("--verbose_fem", action="store_true")
+    p.add_argument("--timing_warmup", type=int, default=5, help="Untimed AENO warm-up repetitions before latency measurement.")
+    p.add_argument("--timing_repeats", type=int, default=20, help="Timed AENO repetitions per sample; the median is recorded.")
+    p.add_argument("--no_plots", action="store_true", help="Skip per-sample and summary plots for multi-run evaluations.")
     return p.parse_args()
 
 
@@ -56,6 +61,24 @@ def rel_l2(pred, ref):
 
 def abs_rel_scalar(pred, ref):
     return float(abs(pred - ref)), float(abs(pred - ref) / (abs(ref) + EPS))
+
+
+def synchronize(device):
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def describe(values, scale=1.0):
+    arr = np.asarray(values, dtype=np.float64) * float(scale)
+    return {
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0,
+        "median": float(np.median(arr)),
+        "p90": float(np.quantile(arr, 0.90)),
+        "p95": float(np.quantile(arr, 0.95)),
+        "maximum": float(np.max(arr)),
+        "n": int(arr.size),
+    }
 
 
 def stack_components(dct):
@@ -256,6 +279,7 @@ def main():
     spacing = None  # V2 recovers strain/stress from nodal Hex8 B-matrix; spacing is ignored.
 
     rows = []
+    did_warmup = False
     for bidx, batch in enumerate(loader):
         chi_t = batch["chi_void"].to(device)
         chi_np_full = to_np(chi_t[0]).astype(np.float64)
@@ -272,11 +296,61 @@ def main():
                 Es_t = torch.tensor([Es], dtype=torch.float32, device=device)
                 nu_t = torch.tensor([nu], dtype=torch.float32, device=device)
 
-                t_pred0 = time.perf_counter()
+                sdf_t = batch["sdf_void"].to(device) if "sdf_void" in batch else None
+                interface_t = batch["interface"].to(device) if "interface" in batch else None
+                bd_t = batch["boundary_distance"].to(device) if "boundary_distance" in batch else None
+
+                def predict_and_recover():
+                    with torch.no_grad():
+                        u_out = model(
+                            chi_t,
+                            Es_t,
+                            nu_t,
+                            sdf_void=sdf_t,
+                            interface=interface_t,
+                            boundary_distance=bd_t,
+                        )
+                        fields_out = compute_fields(
+                            u_out,
+                            chi_t,
+                            Es_t,
+                            nu_t,
+                            eps0=eps0,
+                            spacing=spacing,
+                            alpha_void=alpha_void,
+                        )
+                    return u_out, fields_out
+
+                if not did_warmup:
+                    for _ in range(max(0, args.timing_warmup)):
+                        predict_and_recover()
+                    synchronize(device)
+                    did_warmup = True
+
+                pred_times = []
+                u_nodal = None
+                fields = None
+                for _ in range(max(1, args.timing_repeats)):
+                    synchronize(device)
+                    t_pred0 = time.perf_counter()
+                    u_nodal, fields = predict_and_recover()
+                    synchronize(device)
+                    pred_times.append(time.perf_counter() - t_pred0)
+                pred_time = float(np.median(pred_times))
+
                 with torch.no_grad():
-                    u_nodal = model(chi_t, Es_t, nu_t, batch.get("sdf_void", None).to(device) if "sdf_void" in batch else None, batch.get("interface", None).to(device) if "interface" in batch else None, batch.get("boundary_distance", None).to(device) if "boundary_distance" in batch else None)
-                    fields = compute_fields(u_nodal, chi_t, Es_t, nu_t, eps0=eps0, spacing=spacing, alpha_void=alpha_void)
-                pred_time = time.perf_counter() - t_pred0
+                    equilibrium_terms = fem_energy_residual_objective(
+                        u_nodal,
+                        chi_t,
+                        Es_t,
+                        nu_t,
+                        eps0=eps0,
+                        alpha_void=alpha_void,
+                        interface=interface_t,
+                        interface_alpha=float(cfg.get("interface_residual_alpha", 2.0)),
+                        residual_scale=str(cfg.get("residual_scale", "force")),
+                    )
+                equilibrium_metric = float(equilibrium_terms["residual_per"][0].detach().cpu())
 
                 u_nodal_pred = to_np(u_nodal[0]).astype(np.float64)
                 u_pred = to_np(fields["u_center"][0]).astype(np.float64)
@@ -318,6 +392,9 @@ def main():
                     "fem_downsample": int(args.fem_downsample),
                     "fem_n_elements_per_axis": int(n_fem),
                     "pred_time_s": float(pred_time),
+                    "pred_time_min_s": float(np.min(pred_times)),
+                    "pred_time_p90_s": float(np.quantile(pred_times, 0.90)),
+                    "timing_repeats": int(max(1, args.timing_repeats)),
                     "fem_total_time_s": fem.solve_info["total_time_s"],
                     "fem_assembly_time_s": fem.solve_info["assembly_time_s"],
                     "fem_solve_time_s": fem.solve_info["solve_time_s"],
@@ -338,6 +415,7 @@ def main():
                     "rel_l2_sxx": rel_l2(sig_pred_c["xx"], fem.sig["xx"]),
                     "rel_l2_sig": rel_l2(sig_pred_stack, sig_ref_stack),
                     "rel_l2_vm": rel_l2(vm_pred_c, fem.von_mises),
+                    "equilibrium_metric": equilibrium_metric,
                     "mean_abs_err_ux": float(np.mean(np.abs(u_pred_c[0] - fem.u_center[0]))),
                     "mean_abs_err_exx": float(np.mean(np.abs(eps_pred_c["xx"] - fem.eps["xx"]))),
                     "mean_abs_err_sxx": float(np.mean(np.abs(sig_pred_c["xx"] - fem.sig["xx"]))),
@@ -346,17 +424,18 @@ def main():
                 rows.append(row)
 
                 tag = f"rve{rve_id}_Es{Es:g}_nu{nu:g}_fem{n_fem}"
-                plot_compare_panel(
-                    chi_fem,
-                    fem={"ux": fem.u_center[0], "exx": fem.eps["xx"], "sxx": fem.sig["xx"], "vm": fem.von_mises},
-                    pred={"ux": u_pred_c[0], "exx": eps_pred_c["xx"], "sxx": sig_pred_c["xx"], "vm": vm_pred_c},
-                    out_path=out_dir / f"fem_aeno_abs_error_{tag}.png",
-                    title=(
-                        f"RVE {rve_id}, {porosity_bin}, Es={Es:g}, nu={nu:g}, phi={porosity:.3f}; "
-                        f"relL2(u)={row['rel_l2_u']:.2e}, relL2(sig)={row['rel_l2_sig']:.2e}"
-                    ),
-                    gray=gray_fem,
-                )
+                if not args.no_plots:
+                    plot_compare_panel(
+                        chi_fem,
+                        fem={"ux": fem.u_center[0], "exx": fem.eps["xx"], "sxx": fem.sig["xx"], "vm": fem.von_mises},
+                        pred={"ux": u_pred_c[0], "exx": eps_pred_c["xx"], "sxx": sig_pred_c["xx"], "vm": vm_pred_c},
+                        out_path=out_dir / f"fem_aeno_abs_error_{tag}.png",
+                        title=(
+                            f"RVE {rve_id}, {porosity_bin}, Es={Es:g}, nu={nu:g}, phi={porosity:.3f}; "
+                            f"relL2(u)={row['rel_l2_u']:.2e}, relL2(sig)={row['rel_l2_sig']:.2e}"
+                        ),
+                        gray=gray_fem,
+                    )
 
                 if args.save_npz:
                     np.savez_compressed(
@@ -378,12 +457,56 @@ def main():
 
     df = pd.DataFrame(rows)
     df.to_csv(out_dir / "fem_comparison_metrics.csv", index=False)
-    if len(df) > 0:
+    if len(df) > 0 and not args.no_plots:
         parity_plot(df, "Eeff_fem", "Eeff_aeno", out_dir / "parity_Eeff_fem_vs_aeno.png", r"$E_{eff}$")
         parity_plot(df, "Ksigma95_fem", "Ksigma95_aeno", out_dir / "parity_Ksigma95_fem_vs_aeno.png", r"$K_{\sigma,95}$")
         bar_error_plot(df, out_dir / "summary_relative_errors.png")
         error_by_porosity_bin_plot(df, out_dir / "relative_errors_by_porosity_bin.png")
+    if len(df) > 0:
         df.groupby("porosity_bin")[["rel_l2_u", "rel_l2_eps", "rel_l2_sig", "rel_err_Eeff", "rel_err_Ksigma95"]].agg(["mean", "std", "count"]).to_csv(out_dir / "fem_errors_by_porosity_bin.csv")
+
+    if len(df) > 0:
+        metric_columns = {
+            "displacement_error_pct": "rel_l2_u",
+            "strain_error_pct": "rel_l2_eps",
+            "stress_error_pct": "rel_l2_sig",
+            "effective_modulus_error_pct": "rel_err_Eeff",
+            "Ksigma95_error_pct": "rel_err_Ksigma95",
+            "equilibrium_metric": "equilibrium_metric",
+            "aeno_latency_s": "pred_time_s",
+            "fem_total_time_s": "fem_total_time_s",
+        }
+        statistics = {
+            name: describe(df[column].values, scale=100.0 if name.endswith("_pct") else 1.0)
+            for name, column in metric_columns.items()
+        }
+        summary = {
+            "checkpoint": str(Path(args.checkpoint).resolve()),
+            "checkpoint_epoch": int(ckpt.get("epoch", -1)),
+            "checkpoint_validation_objective": float(ckpt.get("val_loss", np.nan)),
+            "checkpoint_selection": cfg.get("checkpoint_selection", "minimum label-free validation objective"),
+            "test_split_used_for_selection": False,
+            "seed": int(cfg.get("seed", -1)),
+            "objective": "energy_only" if float(cfg.get("residual_weight", 0.0)) == 0 else "energy_plus_equilibrium",
+            "residual_weight": float(cfg.get("residual_weight", 0.0)),
+            "num_parameters": int(sum(p.numel() for p in model.parameters() if p.requires_grad)),
+            "split": args.split,
+            "num_samples": int(len(df)),
+            "timing_scope": "single-sample displacement prediction plus Hex8 field recovery after model loading and warm-up; excludes file I/O and CPU transfer",
+            "timing_warmup": int(args.timing_warmup),
+            "timing_repeats_per_sample": int(args.timing_repeats),
+            "statistics": statistics,
+            "environment": {
+                "python": sys.version.split()[0],
+                "platform": platform.platform(),
+                "processor": platform.processor(),
+                "torch": torch.__version__,
+                "cuda": torch.version.cuda,
+                "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+            },
+        }
+        with open(out_dir / "evaluation_summary.json", "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
 
     with open(out_dir / "fem_eval_config.json", "w", encoding="utf-8") as f:
         json.dump(vars(args), f, indent=2)
