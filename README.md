@@ -36,9 +36,7 @@ MMS/
 
 re/
   run_reservoir_experiments.py  Final reservoir training/evaluation entry point.
-  reservoir_benchmark_cases.csv Fixed 50-case evaluation set.
   reservoir_mesh_convergence.py FEM reference-grid convergence study.
-
 
 RVE/
   aeno_rve/                     Model, features, elasticity and Hex8 FEM modules.
