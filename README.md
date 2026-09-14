@@ -1,8 +1,8 @@
-# Numerics-informed neural operators for linear elasticity
+# A numerics-informed variational neural operator for parametric linear elasticity
 
 This repository contains the code, processed benchmark data, trained-model
-outputs and reproducibility workflows for the manuscript *Numerics-informed
-neural operators for efficient linear elasticity simulations*.
+outputs and reproducibility workflows for the manuscript *A numerics-informed
+variational neural operator for parametric linear elasticity*.
 
 The admissible expected-energy neural operator (AENO) constructs learned
 linear-elastic solvers around the numerical formulation of each problem
@@ -36,7 +36,10 @@ MMS/
 
 re/
   run_reservoir_experiments.py  Final reservoir training/evaluation entry point.
+  reservoir_benchmark_cases.csv Fixed 50-case evaluation set.
   reservoir_mesh_convergence.py FEM reference-grid convergence study.
+  ab/ab_test.py                 Reservoir model, variants and evaluation code.
+  ab/001.py                     Ablation-result plotting and table export.
 
 RVE/
   aeno_rve/                     Model, features, elasticity and Hex8 FEM modules.
@@ -322,8 +325,8 @@ Please cite the manuscript and the archived software release:
 
 ```text
 Liu, P., Wang, J., Sun, S., Zhang, Z., Zhang, J., Zhang, K. & Zhang, L.
-Numerics-informed neural operators for efficient linear elasticity simulations.
-Manuscript prepared for Nature Computational Science (2026). DOI: to be assigned.
+A numerics-informed variational neural operator for parametric linear elasticity.
+Manuscript submitted to the Journal of Computational Physics (2026). DOI: to be assigned.
 ```
 
 When using the CT-RVE data, also cite the original Bristol XCT dataset:
